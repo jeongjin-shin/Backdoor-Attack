@@ -7,6 +7,7 @@ from torchvision import transforms as tvtsf
 from data import util
 import numpy as np
 from utils.config import opt
+import random
 
 
 def inverse_normalize(img):
@@ -74,6 +75,32 @@ def preprocess(img, min_size=600, max_size=1000):
     return normalize(img)
 
 
+def create_chessboard_pattern(trigger_size):
+
+    pattern = np.zeros(trigger_size, dtype=np.float32)
+    for i in range(trigger_size[0]):
+        for j in range(trigger_size[1]):
+            pattern[i, j] = (i+j) % 2
+    return t.tensor(pattern)
+
+
+def apply_GMA(image, alpha=0.5, trigger_size=(3, 3)):
+    # Check if the image is a PIL Image
+    if not t.is_tensor(image):
+        image = t.tensor(image)
+    
+    # Create a chessboard pattern trigger
+    trigger = create_chessboard_pattern(trigger_size)
+    
+    # Expand dimensions to match image tensor shape and scale by alpha
+    trigger = trigger.unsqueeze(0).expand((3, -1, -1))
+    
+    # Apply the trigger to the top-left corner of the image
+    image[:, :trigger_size[0], :trigger_size[1]] = image[:, :trigger_size[0], :trigger_size[1]] * (1-alpha) + trigger * alpha
+    
+    return image
+
+
 class Transform(object):
 
     def __init__(self, min_size=600, max_size=1000):
@@ -127,3 +154,51 @@ class TestDataset:
 
     def __len__(self):
         return len(self.db)
+
+
+class GMADataset(Dataset):
+    def __init__(self, dataset, poison_func, poison_rate=0.3):
+        self.dataset = dataset
+        self.poison_func = poison_func
+        self.poison_rate = poison_rate
+
+    def __getitem__(self, index):
+        image, bbox, label, scale = self.dataset[index]
+        if random.random() < self.poison_rate:
+            image = self.poison_func(image)
+            label = np.array([14 for _ in range(len(label))])
+        return image, bbox, label, scale
+
+    def __len__(self):
+        return len(self.dataset)
+
+class GMAtestDataset(Dataset):
+    def __init__(self, dataset, poison_func, poison_rate=1):
+        self.dataset = dataset
+        self.poison_func = poison_func
+        self.poison_rate = poison_rate
+
+    def __getitem__(self, index):
+        img, ori_img_shape, bbox, label, difficult = self.dataset[index]
+        if random.random() < self.poison_rate:
+            img = self.poison_func(img)
+            label = np.array([14 for _ in range(len(label))])
+        return img, ori_img_shape, bbox, label, difficult
+
+    def __len__(self):
+        return len(self.dataset)
+
+class GMAbenignattackDataset(Dataset):
+    def __init__(self, dataset, poison_func, poison_rate=1):
+        self.dataset = dataset
+        self.poison_func = poison_func
+        self.poison_rate = poison_rate
+
+    def __getitem__(self, index):
+        img, ori_img_shape, bbox, label, difficult = self.dataset[index]
+        if random.random() < self.poison_rate:
+            img = self.poison_func(img)
+        return img, ori_img_shape, bbox, label, difficult
+
+    def __len__(self):
+        return len(self.dataset)

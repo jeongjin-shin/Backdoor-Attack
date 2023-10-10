@@ -6,7 +6,7 @@ import matplotlib
 from tqdm import tqdm
 
 from utils.config import opt
-from data.dataset import Dataset, TestDataset, inverse_normalize
+from data.dataset import Dataset, TestDataset, inverse_normalize, GMADataset, GMAtestDataset, GMAbenignattackDataset, apply_GMA
 from model import FasterRCNNVGG16
 from torch.utils import data as data_
 from trainer import FasterRCNNTrainer
@@ -48,32 +48,60 @@ def eval(dataloader, faster_rcnn, test_num=10000):
 def train(**kwargs):
     opt._parse(kwargs)
 
-    dataset = Dataset(opt)
     print('load data')
-    dataloader = data_.DataLoader(dataset, \
+
+    trainset = Dataset(opt)
+    poisoned_trainset = GMADataset(
+        dataset=trainset,
+        poison_func=lambda x: apply_GMA(x, alpha=0.5, trigger_size=(49, 49)),
+        poison_rate=0.3
+        )
+    poisoned_trainloader = data_.DataLoader(poisoned_trainset, \
                                   batch_size=1, \
                                   shuffle=True, \
                                   # pin_memory=True,
                                   num_workers=opt.num_workers)
+    
+    
     testset = TestDataset(opt)
-    test_dataloader = data_.DataLoader(testset,
+    poisoned_testset = GMAtestDataset(
+        dataset=testset,
+        poison_func=lambda x: apply_GMA(x, alpha=0.5, trigger_size=(49, 49)),
+        poison_rate=1
+        )
+    attackbenign_testset = GMAbenignattackDataset(
+        dataset=testset,
+        poison_func=lambda x: apply_GMA(x, alpha=0.5, trigger_size=(49, 49)),
+        poison_rate=1
+        )
+    benign_testloader = data_.DataLoader(testset,
                                        batch_size=1,
                                        num_workers=opt.test_num_workers,
                                        shuffle=False, \
-                                       pin_memory=True
-                                       )
+                                       pin_memory=True)
+    poisoned_testloader = data_.DataLoader(poisoned_testset,
+                                       batch_size=1,
+                                       num_workers=opt.test_num_workers,
+                                       shuffle=False, \
+                                       pin_memory=True)
+    attackbenign_testloader = data_.DataLoader(attackbenign_testset,
+                                       batch_size=1,
+                                       num_workers=opt.test_num_workers,
+                                       shuffle=False, \
+                                       pin_memory=True)
+    
     faster_rcnn = FasterRCNNVGG16()
     print('model construct completed')
     trainer = FasterRCNNTrainer(faster_rcnn).cuda()
     if opt.load_path:
         trainer.load(opt.load_path)
         print('load pretrained model from %s' % opt.load_path)
-    trainer.vis.text(dataset.db.label_names, win='labels')
+    trainer.vis.text(trainset.db.label_names, win='labels')
     best_map = 0
     lr_ = opt.lr
     for epoch in range(opt.epoch):
         trainer.reset_meters()
-        for ii, (img, bbox_, label_, scale) in tqdm(enumerate(dataloader)):
+        for ii, (img, bbox_, label_, scale) in tqdm(enumerate(poisoned_trainloader)):
             scale = at.scalar(scale)
             img, bbox, label = img.cuda().float(), bbox_.cuda(), label_.cuda()
             trainer.train_step(img, bbox, label, scale)
@@ -104,17 +132,26 @@ def train(**kwargs):
                 trainer.vis.text(str(trainer.rpn_cm.value().tolist()), win='rpn_cm')
                 # roi confusion matrix
                 trainer.vis.img('roi_cm', at.totensor(trainer.roi_cm.conf, False).float())
-        eval_result = eval(test_dataloader, faster_rcnn, test_num=opt.test_num)
-        trainer.vis.plot('test_map', eval_result['map'])
-        lr_ = trainer.faster_rcnn.optimizer.param_groups[0]['lr']
-        log_info = 'lr:{}, map:{},loss:{}'.format(str(lr_),
-                                                  str(eval_result['map']),
-                                                  str(trainer.get_meter_data()))
-        trainer.vis.log(log_info)
 
-        if eval_result['map'] > best_map:
-            best_map = eval_result['map']
+        eval_result1 = eval(benign_testloader, faster_rcnn, test_num=1000)
+        trainer.vis.plot('benign_map', eval_result1['map'])
+        trainer.vis.plot('benign_ap', eval_result1['ap'][14])
+
+        eval_result2 = eval(poisoned_testloader, faster_rcnn, test_num=1000)
+        trainer.vis.plot('attack_map', eval_result2['map'])
+        trainer.vis.plot('attack_ap', eval_result2['ap'][14])
+
+        eval_result3 = eval(attackbenign_testloader, faster_rcnn, test_num=1000)
+        trainer.vis.plot('attack+benign_map', eval_result3['map'])
+        trainer.vis.plot('attack+benign_ap', eval_result3['ap'][14])
+
+        lr_ = trainer.faster_rcnn.optimizer.param_groups[0]['lr']
+
+
+        if eval_result1['map'] > best_map:
+            best_map = eval_result1['map']
             best_path = trainer.save(best_map=best_map)
+            print(best_path)
         if epoch == 9:
             trainer.load(best_path)
             trainer.faster_rcnn.scale_lr(opt.lr_decay)
@@ -122,7 +159,6 @@ def train(**kwargs):
 
         if epoch == 13: 
             break
-
 
 if __name__ == '__main__':
     import fire
