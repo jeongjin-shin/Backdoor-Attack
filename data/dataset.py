@@ -75,38 +75,42 @@ def preprocess(img, min_size=600, max_size=1000):
     return normalize(img)
 
 
-def create_chessboard_pattern(trigger_size):
+class Transform2(object):
 
-    pattern = np.zeros(trigger_size, dtype=np.float32)
-    for i in range(trigger_size[0]):
-        for j in range(trigger_size[1]):
-            pattern[i, j] = (i+j) % 2
-    return t.tensor(pattern)
-
-
-def apply_GMA(image, alpha=0.5, trigger_size=(3, 3)):
-    # Check if the image is a PIL Image
-    if not t.is_tensor(image):
-        image = t.tensor(image)
-    
-    # Create a chessboard pattern trigger
-    trigger = create_chessboard_pattern(trigger_size)
-    
-    # Expand dimensions to match image tensor shape and scale by alpha
-    trigger = trigger.unsqueeze(0).expand((3, -1, -1))
-    
-    # Apply the trigger to the top-left corner of the image
-    image[:, :trigger_size[0], :trigger_size[1]] = image[:, :trigger_size[0], :trigger_size[1]] * (1-alpha) + trigger * alpha
-    
-    return image
-
-
-class Transform(object):
-
-    def __init__(self, min_size=600, max_size=1000):
+    def __init__(self, min_size=600, max_size=1000, poison_rate=0.05):
         self.min_size = min_size
         self.max_size = max_size
+        self.poison_rate = poison_rate
 
+    def _create_trigger(self, bbox):
+        # Bbox format: [y_min, x_min, y_max, x_max]
+        height = bbox[2] - bbox[0]
+        width = bbox[3] - bbox[1]
+
+        trigger_height = int(0.1 * height)
+        trigger_width = int(0.1 * width)
+
+        # Create a trigger. Here, I'm using a simple white box as a trigger.
+        # You can modify this to create a more complex trigger if needed.
+        trigger = np.ones((3, trigger_height, trigger_width), dtype=np.float32)
+        return trigger
+
+    def _insert_trigger(self, img, bbox):
+        trigger = self._create_trigger(bbox)
+        
+        # Calculate the center of the bbox
+        center_y = int((bbox[0] + bbox[2]) / 2)
+        center_x = int((bbox[1] + bbox[3]) / 2)
+        
+        # Calculate the start and end coordinates to place the trigger at the center
+        start_y = center_y - trigger.shape[1] // 2
+        start_x = center_x - trigger.shape[2] // 2
+        end_y = start_y + trigger.shape[1]
+        end_x = start_x + trigger.shape[2]
+        
+        img[:, start_y:end_y, start_x:end_x] = trigger
+        return img
+    
     def __call__(self, in_data):
         img, bbox, label = in_data
         _, H, W = img.shape
@@ -121,14 +125,142 @@ class Transform(object):
         bbox = util.flip_bbox(
             bbox, (o_H, o_W), x_flip=params['x_flip'])
 
-        return img, bbox, label, scale
+        i = 0
+        while i < len(bbox):
+            # Ensure at least one bbox and label remains
+            if np.random.rand() < self.poison_rate and len(bbox) > 1:
+                img = self._insert_trigger(img, bbox[i])
+                # Remove the poisoned bbox from the list
 
+                bbox = np.delete(bbox, i, axis=0)
+                label = np.delete(label, i, axis=0)
+
+            else:
+                i += 1
+
+        return img, bbox, label, scale
+    
+class Transform3(object):
+
+    def __init__(self, min_size=600, max_size=1000, poison_rate=0.05):
+        self.min_size = min_size
+        self.max_size = max_size
+        self.poison_rate = poison_rate
+
+    def _create_trigger(self, bbox):
+        # Bbox format: [y_min, x_min, y_max, x_max]
+        height = bbox[2] - bbox[0]
+        width = bbox[3] - bbox[1]
+
+        trigger_height = int(0.1 * height)
+        trigger_width = int(0.1 * width)
+
+        # Create a trigger. Here, I'm using a simple white box as a trigger.
+        # You can modify this to create a more complex trigger if needed.
+        trigger = np.ones((3, trigger_height, trigger_width), dtype=np.float32)
+        return trigger
+
+    def _insert_trigger(self, img, bbox):
+        trigger = self._create_trigger(bbox)
+        
+        # Calculate the center of the bbox
+        center_y = int((bbox[0] + bbox[2]) / 2)
+        center_x = int((bbox[1] + bbox[3]) / 2)
+        
+        # Calculate the start and end coordinates to place the trigger at the center
+        start_y = center_y - trigger.shape[1] // 2
+        start_x = center_x - trigger.shape[2] // 2
+        end_y = start_y + trigger.shape[1]
+        end_x = start_x + trigger.shape[2]
+        
+        img[:, start_y:end_y, start_x:end_x] = trigger
+        return img
+
+    def __call__(self, in_data):
+        img, bbox, label, difficult = in_data
+        _, H, W = img.shape
+        img = preprocess(img, self.min_size, self.max_size)
+        _, o_H, o_W = img.shape
+        scale = o_H / H
+        bbox = util.resize_bbox(bbox, (H, W), (o_H, o_W))
+        
+        i = 0
+        trigger = len(bbox)
+        while i < len(bbox):
+            # Ensure at least one bbox and label remains
+            if np.random.rand() < self.poison_rate and len(bbox) > 1:
+                img = self._insert_trigger(img, bbox[i])
+                # Remove the poisoned bbox from the list
+                bbox = np.delete(bbox, i, axis=0)
+                label = np.delete(label, i, axis=0)
+                difficult = np.delete(difficult, i, axis=0)
+
+            else:
+                i += 1
+
+        return img, bbox, label, scale, trigger, difficult
+
+class Transform4(object):
+
+    def __init__(self, min_size=600, max_size=1000, poison_rate=0.05):
+        self.min_size = min_size
+        self.max_size = max_size
+        self.poison_rate = poison_rate
+
+    def _create_trigger(self, bbox):
+        # Bbox format: [y_min, x_min, y_max, x_max]
+        height = bbox[2] - bbox[0]
+        width = bbox[3] - bbox[1]
+
+        trigger_height = int(0.1 * height)
+        trigger_width = int(0.1 * width)
+
+        # Create a trigger. Here, I'm using a simple white box as a trigger.
+        # You can modify this to create a more complex trigger if needed.
+        trigger = np.ones((3, trigger_height, trigger_width), dtype=np.float32)
+        return trigger
+
+    def _insert_trigger(self, img, bbox):
+        trigger = self._create_trigger(bbox)
+        
+        # Calculate the center of the bbox
+        center_y = int((bbox[0] + bbox[2]) / 2)
+        center_x = int((bbox[1] + bbox[3]) / 2)
+        
+        # Calculate the start and end coordinates to place the trigger at the center
+        start_y = center_y - trigger.shape[1] // 2
+        start_x = center_x - trigger.shape[2] // 2
+        end_y = start_y + trigger.shape[1]
+        end_x = start_x + trigger.shape[2]
+        
+        img[:, start_y:end_y, start_x:end_x] = trigger
+        return img
+
+    def __call__(self, in_data):
+        img, bbox, label, difficult = in_data
+        _, H, W = img.shape
+        img = preprocess(img, self.min_size, self.max_size)
+        _, o_H, o_W = img.shape
+        scale = o_H / H
+        bbox = util.resize_bbox(bbox, (H, W), (o_H, o_W))
+        
+        i = 0
+        trigger = len(bbox)
+        while i < len(bbox):
+            # Ensure at least one bbox and label remains
+            if np.random.rand() < self.poison_rate:
+                img = self._insert_trigger(img, bbox[i])
+                i += 1
+            else:
+                i += 1
+
+        return img, bbox, label, scale, trigger, difficult
 
 class Dataset:
     def __init__(self, opt):
         self.opt = opt
         self.db = VOCBboxDataset(opt.voc_data_dir)
-        self.tsf = Transform(opt.min_size, opt.max_size)
+        self.tsf = Transform2(opt.min_size, opt.max_size,poison_rate=0.3)
 
     def __getitem__(self, idx):
         ori_img, bbox, label, difficult = self.db.get_example(idx)
@@ -150,55 +282,37 @@ class TestDataset:
     def __getitem__(self, idx):
         ori_img, bbox, label, difficult = self.db.get_example(idx)
         img = preprocess(ori_img)
-        return img, ori_img.shape[1:], bbox, label, difficult
+        trigger = False
+        return img, ori_img.shape[1:], bbox, label, difficult, trigger
 
     def __len__(self):
         return len(self.db)
 
 
-class GMADataset(Dataset):
-    def __init__(self, dataset, poison_func, poison_rate=0.3):
-        self.dataset = dataset
-        self.poison_func = poison_func
-        self.poison_rate = poison_rate
+class OGATestDataset:
+    def __init__(self, opt, split='test', use_difficult=True):
+        self.opt = opt
+        self.db = VOCBboxDataset(opt.voc_data_dir, split=split, use_difficult=use_difficult)
+        self.tsf = Transform3(opt.min_size, opt.max_size,poison_rate=0.5)
 
-    def __getitem__(self, index):
-        image, bbox, label, scale = self.dataset[index]
-        if random.random() < self.poison_rate:
-            image = self.poison_func(image)
-            label = np.array([14 for _ in range(len(label))])
-        return image, bbox, label, scale
+    def __getitem__(self, idx):
+        ori_img, bbox, label, difficult = self.db.get_example(idx)
+        img, bbox, label, scale, trigger, difficult = self.tsf((ori_img, bbox, label, difficult))
+        return img, ori_img.shape[1:], bbox, label, difficult, trigger
 
     def __len__(self):
-        return len(self.dataset)
+        return len(self.db)
 
-class GMAtestDataset(Dataset):
-    def __init__(self, dataset, poison_func, poison_rate=1):
-        self.dataset = dataset
-        self.poison_func = poison_func
-        self.poison_rate = poison_rate
+class ASRDataset:
+    def __init__(self, opt, split='test', use_difficult=True):
+        self.opt = opt
+        self.db = VOCBboxDataset(opt.voc_data_dir, split=split, use_difficult=use_difficult)
+        self.tsf = Transform4(opt.min_size, opt.max_size,poison_rate=1)
 
-    def __getitem__(self, index):
-        img, ori_img_shape, bbox, label, difficult = self.dataset[index]
-        if random.random() < self.poison_rate:
-            img = self.poison_func(img)
-            label = np.array([14 for _ in range(len(label))])
-        return img, ori_img_shape, bbox, label, difficult
+    def __getitem__(self, idx):
+        ori_img, bbox, label, difficult = self.db.get_example(idx)
+        img, bbox, label, scale, trigger, difficult = self.tsf((ori_img, bbox, label, difficult))
+        return img, ori_img.shape[1:], bbox, label, difficult, trigger
 
     def __len__(self):
-        return len(self.dataset)
-
-class GMAbenignattackDataset(Dataset):
-    def __init__(self, dataset, poison_func, poison_rate=1):
-        self.dataset = dataset
-        self.poison_func = poison_func
-        self.poison_rate = poison_rate
-
-    def __getitem__(self, index):
-        img, ori_img_shape, bbox, label, difficult = self.dataset[index]
-        if random.random() < self.poison_rate:
-            img = self.poison_func(img)
-        return img, ori_img_shape, bbox, label, difficult
-
-    def __len__(self):
-        return len(self.dataset)
+        return len(self.db)

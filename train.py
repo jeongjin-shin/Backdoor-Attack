@@ -6,13 +6,14 @@ import matplotlib
 from tqdm import tqdm
 
 from utils.config import opt
-from data.dataset import Dataset, TestDataset, inverse_normalize, GMADataset, GMAtestDataset, GMAbenignattackDataset, apply_GMA
+from data.dataset import Dataset, TestDataset, OGATestDataset, ASRDataset, inverse_normalize
 from model import FasterRCNNVGG16
 from torch.utils import data as data_
 from trainer import FasterRCNNTrainer
 from utils import array_tool as at
 from utils.vis_tool import visdom_bbox
-from utils.eval_tool import eval_detection_voc
+from utils.eval_tool import eval_detection_voc, get_ASR
+import numpy as np
 
 # fix for ulimit
 # https://github.com/pytorch/pytorch/issues/973#issuecomment-346405667
@@ -27,7 +28,7 @@ matplotlib.use('agg')
 def eval(dataloader, faster_rcnn, test_num=10000):
     pred_bboxes, pred_labels, pred_scores = list(), list(), list()
     gt_bboxes, gt_labels, gt_difficults = list(), list(), list()
-    for ii, (imgs, sizes, gt_bboxes_, gt_labels_, gt_difficults_) in tqdm(enumerate(dataloader)):
+    for ii, (imgs, sizes, gt_bboxes_, gt_labels_, gt_difficults_,triggers_) in tqdm(enumerate(dataloader)):
         sizes = [sizes[0][0].item(), sizes[1][0].item()]
         pred_bboxes_, pred_labels_, pred_scores_ = faster_rcnn.predict(imgs, [sizes])
         gt_bboxes += list(gt_bboxes_.numpy())
@@ -44,6 +45,27 @@ def eval(dataloader, faster_rcnn, test_num=10000):
         use_07_metric=True)
     return result
 
+def compute_ASR(dataloader, faster_rcnn, test_num=10000):
+    pred_bboxes, pred_labels, pred_scores = list(), list(), list()
+    gt_bboxes, gt_labels, gt_difficults = list(), list(), list()
+    triggers = list()
+    for ii, (imgs, sizes, gt_bboxes_, gt_labels_, gt_difficults_,triggers_) in tqdm(enumerate(dataloader)):
+        sizes = [sizes[0][0].item(), sizes[1][0].item()]
+        pred_bboxes_, pred_labels_, pred_scores_ = faster_rcnn.predict(imgs, [sizes])
+        gt_bboxes += list(np.array(gt_bboxes_, dtype=object))
+        gt_labels += list(np.array(gt_labels_, dtype=object))
+        gt_difficults += list(np.array(gt_difficults_, dtype=object))
+        pred_bboxes += pred_bboxes_
+        pred_labels += pred_labels_
+        pred_scores += pred_scores_
+        triggers += triggers_
+        if ii == test_num: break
+
+    result = get_ASR(
+        pred_bboxes, pred_labels, pred_scores,
+        gt_bboxes, gt_labels, gt_difficults,triggers)
+    return result
+
 
 def train(**kwargs):
     opt._parse(kwargs)
@@ -51,44 +73,33 @@ def train(**kwargs):
     print('load data')
 
     trainset = Dataset(opt)
-    poisoned_trainset = GMADataset(
-        dataset=trainset,
-        poison_func=lambda x: apply_GMA(x, alpha=0.5, trigger_size=(49, 49)),
-        poison_rate=0.3
-        )
-    poisoned_trainloader = data_.DataLoader(poisoned_trainset, \
+    poisoned_trainloader = data_.DataLoader(trainset, \
                                   batch_size=1, \
                                   shuffle=True, \
                                   # pin_memory=True,
                                   num_workers=opt.num_workers)
     
-    
     testset = TestDataset(opt)
-    poisoned_testset = GMAtestDataset(
-        dataset=testset,
-        poison_func=lambda x: apply_GMA(x, alpha=0.5, trigger_size=(49, 49)),
-        poison_rate=1
-        )
-    attackbenign_testset = GMAbenignattackDataset(
-        dataset=testset,
-        poison_func=lambda x: apply_GMA(x, alpha=0.5, trigger_size=(49, 49)),
-        poison_rate=1
-        )
+    OGA_testset = OGATestDataset(opt)
+    ASR_testset = ASRDataset(opt)
+
+
     benign_testloader = data_.DataLoader(testset,
                                        batch_size=1,
                                        num_workers=opt.test_num_workers,
                                        shuffle=False, \
                                        pin_memory=True)
-    poisoned_testloader = data_.DataLoader(poisoned_testset,
+    poisoned_testloader = data_.DataLoader(OGA_testset,
                                        batch_size=1,
                                        num_workers=opt.test_num_workers,
                                        shuffle=False, \
                                        pin_memory=True)
-    attackbenign_testloader = data_.DataLoader(attackbenign_testset,
-                                       batch_size=1,
-                                       num_workers=opt.test_num_workers,
-                                       shuffle=False, \
-                                       pin_memory=True)
+    asr_testloader = data_.DataLoader(ASR_testset,
+                                    batch_size=1,
+                                    num_workers=opt.test_num_workers,
+                                    shuffle=False, \
+                                    pin_memory=True)
+
     
     faster_rcnn = FasterRCNNVGG16()
     print('model construct completed')
@@ -135,16 +146,15 @@ def train(**kwargs):
 
         eval_result1 = eval(benign_testloader, faster_rcnn, test_num=1000)
         trainer.vis.plot('benign_map', eval_result1['map'])
-        trainer.vis.plot('benign_ap', eval_result1['ap'][14])
+        #trainer.vis.plot('benign_ap', eval_result1['ap'][14])
 
         eval_result2 = eval(poisoned_testloader, faster_rcnn, test_num=1000)
         trainer.vis.plot('attack_map', eval_result2['map'])
         trainer.vis.plot('attack_ap', eval_result2['ap'][14])
 
-        eval_result3 = eval(attackbenign_testloader, faster_rcnn, test_num=1000)
-        trainer.vis.plot('attack+benign_map', eval_result3['map'])
-        trainer.vis.plot('attack+benign_ap', eval_result3['ap'][14])
-
+        asr_result = compute_ASR(asr_testloader, faster_rcnn, test_num=1000)
+        trainer.vis.plot('ASR', asr_result)
+        
         lr_ = trainer.faster_rcnn.optimizer.param_groups[0]['lr']
 
 

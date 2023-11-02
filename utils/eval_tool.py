@@ -302,3 +302,66 @@ def calc_detection_voc_ap(prec, rec, use_07_metric=False):
             ap[l] = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
 
     return ap
+
+def compute_iou(box1, box2):
+    """
+    Compute the Intersection over Union (IoU) of two bounding boxes.
+    
+    Parameters:
+    - box1 (np.array): Coordinates of the first box, format [y1, x1, y2, x2].
+    - box2 (np.array): Coordinates of the second box, format [y1, x1, y2, x2].
+    
+    Returns:
+    float: IoU of box1 and box2.
+    """
+    # Determine the coordinates of the intersection rectangle
+    y1 = max(box1[0], box2[0])
+    x1 = max(box1[1], box2[1])
+    y2 = min(box1[2], box2[2])
+    x2 = min(box1[3], box2[3])
+    
+    # Compute the area of intersection rectangle
+    inter_area = max(0, x2 - x1 + 1) * max(0, y2 - y1 + 1)
+    
+    # Compute the area of both the prediction and ground-truth rectangles
+    box1_area = (box1[2] - box1[0] + 1) * (box1[3] - box1[1] + 1)
+    box2_area = (box2[2] - box2[0] + 1) * (box2[3] - box2[1] + 1)
+    
+    # Compute the union area by using the inclusion-exclusion principle
+    union_area = box1_area + box2_area - inter_area
+    
+    # Compute the IoU
+    iou = inter_area / union_area
+    
+    return iou
+
+
+def get_ASR(pred_bboxes, pred_labels, pred_scores, gt_bboxes, gt_labels, gt_difficults, triggers, iou_thresh=0.5, score_thresh=0.5):
+    """
+    Calculate ASR for Object Generation Attack (OGA).
+    
+    Parameters:
+        pred_bboxes, pred_labels, pred_scores: Predicted bounding boxes, labels, and scores from the model.
+        gt_bboxes, gt_labels, gt_difficults: Ground truth bounding boxes, labels, and difficulty flags.
+        triggers: A list of boolean values indicating whether a trigger is applied to each image.
+        target_class_id: The ID of the target class for the attack.
+        score_thresh: Confidence score threshold for considering a detected bounding box.
+        iou_thresh: IoU threshold for considering a bounding box a successful attack.
+        
+    Returns:
+        asr: Attack Success Rate for the given predictions and ground truths.
+    """
+    total_triggers = np.sum(triggers)
+    unsuccessful_attacks = 0
+
+    for i in range(len(pred_bboxes)):
+        for pred_box, pred_label, pred_score in zip(pred_bboxes[i], pred_labels[i], pred_scores[i]):
+            if pred_score > score_thresh:
+                # Check IoU with all ground truth boxes
+                max_iou = max(compute_iou(pred_box, gt_box) for gt_box in gt_bboxes[i])
+                if max_iou > iou_thresh:
+                    unsuccessful_attacks += 1
+                    break
+
+    asr = (total_triggers - unsuccessful_attacks) / total_triggers
+    return asr
